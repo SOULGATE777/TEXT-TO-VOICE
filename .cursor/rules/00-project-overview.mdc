@@ -1,0 +1,81 @@
+---
+description: "Contexto general del proyecto TEXT-TO-VOICE - Servicio TTS con Edge TTS"
+alwaysApply: false
+---
+# TEXT-TO-VOICE - Project Overview
+
+## 📋 Descripción del Proyecto
+
+Este es un servicio de **Text-to-Speech (TTS)** ultra-ligero que utiliza Microsoft Edge TTS como motor de síntesis de voz.
+
+### Características Principales
+- **Motor**: Microsoft Edge TTS (servicio cloud)
+- **RAM**: ~20-50MB (vs ~800MB+ de alternativas locales)
+- **Voces**: 400+ en 100+ idiomas
+- **Streaming**: Soporte para streaming multipart/mixed
+
+## 🛠️ Tech Stack
+
+| Componente | Tecnología |
+|------------|-----------|
+| Runtime | Python 3.11 |
+| Framework | FastAPI 0.115.6 |
+| TTS Engine | edge-tts 7.0+ |
+| Validación | Pydantic 2.8.2 |
+| Server | Uvicorn 0.30.6 |
+
+## 📁 Estructura del Proyecto
+
+```
+TEXT-TO-VOICE/
+├── app/
+│   ├── __init__.py
+│   └── main.py          # Servidor FastAPI principal (483 líneas)
+├── scripts/             # Scripts de testing manual
+├── Dockerfile           # Puerto: 5032
+├── requirements.txt
+└── *.md                 # Documentación
+```
+
+## 🔌 Endpoints Disponibles
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| POST | `/tts` | Audio completo (MP3) |
+| POST | `/tts/stream` | Streaming multipart/mixed |
+| GET | `/health` | Health check |
+| GET | `/voices` | Lista de voces disponibles |
+| GET | `/stats` | Estadísticas del servidor |
+
+## ⚙️ Configuración de Voces
+
+El sistema mapea voces legacy de Kokoro a Edge TTS:
+
+```python
+VOICE_MAPPING = {
+    "af_heart": "en-US-JennyNeural",
+    "es_female": "es-MX-DaliaNeural",
+    "es_spain_male": "es-ES-AlvaroNeural",
+    # ...
+}
+```
+
+## 🚨 Reglas Críticas
+
+1. **Puerto Docker**: El Dockerfile expone el puerto `5032`, NO 8000
+2. **Conexión Internet**: El servicio REQUIERE conexión a internet
+3. **Voces Edge TTS**: Usar nombres de voz con sufijo `Neural` (ej: `en-US-JennyNeural`)
+
+## 📝 Convenciones del Proyecto
+
+- Toda la lógica del servidor está en `app/main.py`
+- Usar Pydantic para validación de requests
+- Estadísticas en tiempo real con `defaultdict`
+- Health check DEBE incluir uso de memoria
+
+## 🔗 Documentación Relacionada
+
+- `README.md` - Guía de uso básica
+- `COMO_FUNCIONA_TTS.md` - Documentación técnica detallada
+- `DOCKER.md` - Instrucciones de Docker
+- `AWS_DEPLOYMENT.md` - Deployment en AWS

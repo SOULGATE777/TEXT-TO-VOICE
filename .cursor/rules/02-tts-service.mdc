@@ -1,0 +1,173 @@
+---
+globs:
+  - "app/**/*"
+description: "Patrones específicos del servicio Edge TTS"
+---
+
+# TTS Service Patterns
+
+## 🎤 Edge TTS Integration
+
+### Voice Mapping
+
+You MUST maintain backwards compatibility with Kokoro voice names:
+
+```python
+VOICE_MAPPING = {
+    # Voces femeninas americanas
+    "af_heart": "en-US-JennyNeural",
+    "af_soul": "en-US-AriaNeural",
+    # Voces en español
+    "es_female": "es-MX-DaliaNeural",
+    "es_male": "es-MX-JorgeNeural",
+    "es_spain_female": "es-ES-ElviraNeural",
+    "es_spain_male": "es-ES-AlvaroNeural",
+}
+```
+
+### Voice Resolution
+
+You MUST implement fallback logic for voice resolution:
+
+```python
+def get_edge_voice(kokoro_voice: str, lang_code: str) -> str:
+    # 1. Si ya es una voz Edge TTS válida, usarla directamente
+    if 'Neural' in kokoro_voice:
+        return kokoro_voice
+    
+    # 2. Intentar mapeo directo
+    if kokoro_voice in VOICE_MAPPING:
+        return VOICE_MAPPING[kokoro_voice]
+    
+    # 3. Fallback a voz por defecto del idioma
+    locale = LANG_MAPPING.get(lang_code, "en-US")
+    return DEFAULT_VOICES.get(locale, "en-US-JennyNeural")
+```
+
+### Language Codes
+
+Maintain Kokoro-compatible language codes:
+
+| Código | Idioma | Edge Locale |
+|--------|--------|-------------|
+| `a` | Inglés (US) | en-US |
+| `b` | Inglés (UK) | en-GB |
+| `e` | Español (MX) | es-MX |
+| `es_spain` | Español (ES) | es-ES |
+| `f` | Francés | fr-FR |
+| `i` | Italiano | it-IT |
+| `j` | Japonés | ja-JP |
+| `p` | Portugués | pt-BR |
+| `z` | Chino | zh-CN |
+
+## 📡 Streaming Pattern
+
+### Text Chunking
+
+You MUST implement smart text splitting for streaming:
+
+```python
+def smart_text_split(text: str, max_chars: int = 500) -> List[str]:
+    """
+    Divide texto para streaming fluido.
+    1. Primero por párrafos (\\n\\n)
+    2. Luego por oraciones (. ! ?)
+    3. Máximo ~800 caracteres por chunk
+    """
+    # Implementation...
+```
+
+### Multipart Response Format
+
+Use boundary `--frame` for multipart streaming:
+
+```python
+BOUNDARY = "--frame"
+
+def part(content_type: str, data: bytes) -> bytes:
+    headers = (
+        f"{BOUNDARY}\r\n"
+        f"Content-Type: {content_type}\r\n"
+        f"Content-Length: {len(data)}\r\n\r\n"
+    ).encode("utf-8")
+    return headers + data + b"\r\n"
+```
+
+### Client Disconnection Handling
+
+You MUST handle client disconnection gracefully:
+
+```python
+async def stream_with_disconnect_check(req: TTSRequest, request: Request):
+    client_disconnected = asyncio.Event()
+    
+    async def check_disconnect():
+        while not client_disconnected.is_set():
+            if await request.is_disconnected():
+                client_disconnected.set()
+                break
+            await asyncio.sleep(0.5)
+    
+    # Start disconnect check task
+    disconnect_task = asyncio.create_task(check_disconnect())
+    # ...
+```
+
+## 📊 Statistics Tracking
+
+You MUST track statistics for monitoring:
+
+```python
+from collections import defaultdict
+
+_stats = defaultdict(int)
+
+# En el flujo de streaming:
+_stats["stream_requests"] += 1
+_stats["successful_streams"] += 1
+_stats["chunks_sent"] += chunk_count
+_stats["failed_streams"] += 1
+_stats["cancelled_streams"] += 1
+```
+
+## ⚡ Speed Conversion
+
+Convert speed factor to Edge TTS rate format:
+
+```python
+def speed_to_rate(speed: float) -> str:
+    """
+    speed 0.5 → "-50%"
+    speed 1.0 → "+0%"
+    speed 1.5 → "+50%"
+    speed 2.0 → "+100%"
+    """
+    if speed == 1.0:
+        return "+0%"
+    elif speed > 1.0:
+        return f"+{int((speed - 1.0) * 100)}%"
+    else:
+        return f"-{int((1.0 - speed) * 100)}%"
+```
+
+## 🚨 Error Handling
+
+You MUST handle Edge TTS errors gracefully:
+
+```python
+try:
+    communicate = edge_tts.Communicate(text, voice, rate=rate)
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_data += chunk["data"]
+except Exception as e:
+    print(f"❌ Error generando audio: {e}")
+    # Return empty bytes or raise appropriate error
+```
+
+## ⚠️ Consideraciones Importantes
+
+1. **Conexión Internet**: Edge TTS REQUIERE conexión a internet
+2. **Latencia**: Considerar latencia de red en diseño
+3. **Rate Limiting**: Microsoft puede limitar requests excesivos
+4. **Audio Format**: Edge TTS genera MP3 nativo (no WAV)
