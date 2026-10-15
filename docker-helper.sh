@@ -30,8 +30,9 @@ show_help() {
 }
 
 build_image() {
-    echo "Building Docker image..."
-    docker-compose build
+    # --no-cache: edge-tts must be >=7.3.1 (cached 7.0.x → Microsoft WSS 403)
+    echo "Building Docker image (no cache)..."
+    docker-compose build --no-cache
 }
 
 start_service() {

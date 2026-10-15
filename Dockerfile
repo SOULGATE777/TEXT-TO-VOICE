@@ -12,8 +12,10 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies (Edge TTS is very lightweight)
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies (Edge TTS is very lightweight).
+# edge-tts must be >=7.3.1 (older builds get Microsoft WSS 403 / Sec-MS-GEC).
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -c "import edge_tts; import importlib.metadata as m; v=m.version('edge-tts'); print(f'edge-tts={v}'); t=tuple(int(x) for x in v.split('.')[:3]); assert t >= (7, 3, 1), v"
 
 # Copy application code
 COPY app/ ./app/

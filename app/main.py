@@ -220,27 +220,31 @@ def part(content_type: str, data: bytes) -> bytes:
     return headers + data + b"\r\n"
 
 
-async def generate_audio_chunk(text: str, voice: str, rate: str) -> bytes:
-    """Generar audio para un chunk de texto usando Edge TTS"""
-    try:
-        communicate = edge_tts.Communicate(text, voice, rate=rate)
-        
-        # Recolectar todos los datos de audio
-        audio_data = b""
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_data += chunk["data"]
-        
-        return audio_data
-    except Exception as e:
-        print(f"❌ Error generando audio: {e}")
-        return b""
+async def synthesize_mp3(text: str, voice: str, rate: str) -> bytes:
+    """Synthesize one text segment to MP3. Raises on upstream failure / empty audio."""
+    communicate = edge_tts.Communicate(text, voice, rate=rate)
+    audio_data = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_data += chunk["data"]
+    if not audio_data:
+        raise RuntimeError("empty audio from Edge TTS")
+    return audio_data
 
 
-async def edge_tts_stream(req: TTSRequest, client_disconnected: asyncio.Event = None) -> AsyncGenerator[bytes, None]:
+async def edge_tts_stream(
+    req: TTSRequest,
+    client_disconnected: asyncio.Event = None,
+    *,
+    edge_voice: str = None,
+    rate: str = None,
+    text_chunks: List[str] = None,
+    first_audio: bytes = None,
+) -> AsyncGenerator[bytes, None]:
     """
-    Stream de audio usando Edge TTS.
-    Genera audio en formato MP3 (nativo de Edge TTS).
+    Stream de audio usando Edge TTS (MP3 / audio/mpeg).
+    When first_audio is provided, it was prefetched before StreamingResponse so
+    handshake/empty failures can return HTTP 502 instead of a fake 200 multipart.
     """
     start_time = time.time()
     chunk_count = 0
@@ -248,62 +252,67 @@ async def edge_tts_stream(req: TTSRequest, client_disconnected: asyncio.Event = 
     try:
         _stats["stream_requests"] += 1
         
-        # Configurar voz y rate
-        edge_voice = get_edge_voice(req.voice, req.lang)
-        rate = speed_to_rate(req.speed)
+        edge_voice = edge_voice or get_edge_voice(req.voice, req.lang)
+        rate = rate or speed_to_rate(req.speed)
         
         mem_start = get_memory_usage_mb()
         print(f"🎤 Edge TTS Stream - voice: {edge_voice}, rate: {rate}, text: {len(req.text)} chars")
         
-        # Dividir texto en chunks para streaming más fluido
-        text_chunks = smart_text_split(req.text, max_chars=800)
+        text_chunks = text_chunks if text_chunks is not None else smart_text_split(req.text, max_chars=800)
         total_chunks = len(text_chunks)
+        start_i = 0
         
         print(f"📝 Dividido en {total_chunks} chunks para streaming")
+
+        if first_audio:
+            chunk_count += 1
+            print(f"  ✅ Chunk 1/{total_chunks}: {len(first_audio)} bytes (prefetched)")
+            yield part("audio/mpeg", first_audio)
+            start_i = 1
+            await asyncio.sleep(0.01)
         
-        for i, chunk_text in enumerate(text_chunks):
+        for i in range(start_i, total_chunks):
             if client_disconnected and client_disconnected.is_set():
                 print(f"⚠️ Cliente desconectado en chunk {i+1}/{total_chunks}")
                 break
             
             try:
                 chunk_start = time.time()
-                
-                # Generar audio con Edge TTS
-                communicate = edge_tts.Communicate(chunk_text, edge_voice, rate=rate)
-                
-                # Recolectar audio del chunk
-                audio_data = b""
-                async for data in communicate.stream():
-                    if data["type"] == "audio":
-                        audio_data += data["data"]
-                
-                if audio_data:
-                    chunk_count += 1
-                    chunk_time = time.time() - chunk_start
-                    
-                    # Edge TTS genera MP3, pero lo enviamos como audio/mpeg
-                    # El frontend puede manejar ambos formatos
-                    print(f"  ✅ Chunk {i+1}/{total_chunks}: {len(audio_data)} bytes en {chunk_time:.2f}s")
-                    
-                    # Enviar como audio/mpeg (MP3 nativo de Edge TTS)
-                    yield part("audio/mpeg", audio_data)
-                    
-                    await asyncio.sleep(0.01)  # Pequeña pausa
+                audio_data = await synthesize_mp3(text_chunks[i], edge_voice, rate)
+                chunk_count += 1
+                chunk_time = time.time() - chunk_start
+                print(f"  ✅ Chunk {i+1}/{total_chunks}: {len(audio_data)} bytes en {chunk_time:.2f}s")
+                yield part("audio/mpeg", audio_data)
+                await asyncio.sleep(0.01)
                     
             except Exception as e:
                 print(f"❌ Error en chunk {i+1}: {e}")
+                # Abort remaining chunks on handshake/auth failures.
+                # If nothing yielded yet, outer re-raises → 5xx; else generic text part.
+                err_name = type(e).__name__
+                err_msg = str(e)
+                if (
+                    "403" in err_msg
+                    or "Invalid response status" in err_msg
+                    or err_name in ("WSServerHandshakeError", "ClientResponseError")
+                    or "empty audio" in err_msg
+                ):
+                    raise
                 continue
         
-        # Estadísticas finales
         total_time = time.time() - start_time
         mem_end = get_memory_usage_mb()
+
+        if chunk_count == 0:
+            raise RuntimeError(
+                "No audio chunks generated (upstream Edge TTS failed for all text parts)"
+            )
+
         print(f"✅ Stream completado: {chunk_count}/{total_chunks} chunks en {total_time:.2f}s (mem: {mem_start:.1f}→{mem_end:.1f}MB)")
         
         _stats["successful_streams"] += 1
         _stats["chunks_sent"] += chunk_count
         
-        # Boundary final
         yield (f"{BOUNDARY}--\r\n").encode("utf-8")
         
     except asyncio.CancelledError:
@@ -311,9 +320,12 @@ async def edge_tts_stream(req: TTSRequest, client_disconnected: asyncio.Event = 
         _stats["cancelled_streams"] += 1
         raise
     except Exception as e:
+        # Log full upstream detail server-side only (may include WSS query tokens).
         print(f"❌ Error fatal en stream: {e}")
         _stats["failed_streams"] += 1
-        yield part("text/plain; charset=utf-8", f"Error: {e}".encode("utf-8"))
+        if chunk_count == 0:
+            raise
+        yield part("text/plain; charset=utf-8", b"Error: synthesis failed")
         yield (f"{BOUNDARY}--\r\n").encode("utf-8")
 
 
@@ -372,7 +384,8 @@ async def list_voices():
             "kokoro_mapping": VOICE_MAPPING
         }
     except Exception as e:
-        return {"error": str(e)}
+        print(f"❌ Error listando voces: {e}")
+        return {"error": "Failed to list voices"}
 
 
 @app.post("/tts")
@@ -398,25 +411,45 @@ async def tts_single(req: TTSRequest):
                 audio_data += chunk["data"]
         
         if not audio_data:
-            raise HTTPException(status_code=500, detail="No se pudo generar audio")
+            raise HTTPException(status_code=502, detail="No se pudo generar audio (upstream Edge TTS vacío)")
         
         _stats["successful_requests"] += 1
         
         # Edge TTS genera MP3
         return Response(content=audio_data, media_type="audio/mpeg")
         
-    except Exception as e:
+    except HTTPException:
         _stats["failed_requests"] += 1
-        raise HTTPException(status_code=500, detail=f"Error de síntesis: {str(e)}")
+        raise
+    except Exception as e:
+        # Never echo str(e) to clients — Edge WSS errors can include TrustedClientToken / Sec-MS-GEC.
+        print(f"❌ Error de síntesis: {e}")
+        _stats["failed_requests"] += 1
+        raise HTTPException(status_code=502, detail="Error de síntesis")
 
 
 @app.post("/tts/stream")
 async def tts_stream(req: TTSRequest, request: Request):
-    """Endpoint de streaming TTS - compatible con frontend existente"""
+    """Endpoint de streaming TTS - compatible con frontend existente.
+
+    Prefetches the first audio part before StreamingResponse so handshake/empty
+    failures return HTTP 502 JSON (same contract as /tts and FE peek).
+    """
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="El texto no puede estar vacío")
+
+    edge_voice = get_edge_voice(req.voice, req.lang)
+    rate = speed_to_rate(req.speed)
+    text_chunks = smart_text_split(req.text, max_chars=800)
+
+    # Buffer first MP3 before committing HTTP 200 multipart.
+    try:
+        first_audio = await synthesize_mp3(text_chunks[0], edge_voice, rate)
+    except Exception as e:
+        print(f"❌ Error prefetch stream: {e}")
+        _stats["failed_streams"] += 1
+        raise HTTPException(status_code=502, detail="Error de síntesis")
     
-    # Evento para detectar desconexión
     client_disconnected = asyncio.Event()
     
     async def check_disconnect():
@@ -431,7 +464,14 @@ async def tts_stream(req: TTSRequest, request: Request):
     
     async def stream_with_cleanup():
         try:
-            async for chunk in edge_tts_stream(req, client_disconnected):
+            async for chunk in edge_tts_stream(
+                req,
+                client_disconnected,
+                edge_voice=edge_voice,
+                rate=rate,
+                text_chunks=text_chunks,
+                first_audio=first_audio,
+            ):
                 yield chunk
         finally:
             client_disconnected.set()

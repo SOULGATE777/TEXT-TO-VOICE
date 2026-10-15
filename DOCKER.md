@@ -13,6 +13,11 @@ Este directorio contiene la configuración Docker para ejecutar el servicio Soul
 
 ### 1. Construir e Iniciar el Servicio
 
+> **Importante (Edge TTS 403):** Si el contenedor se construyó con `edge-tts` 7.0.x, Microsoft
+> responde `403 Invalid response status` (Sec-MS-GEC). `requirements.txt` exige `edge-tts>=7.3.1`.
+> Tras actualizar deps, reconstruye **sin caché**:
+> `docker compose build --no-cache && docker compose up -d`
+
 ```bash
 # Usando docker-compose directamente
 docker-compose up -d
